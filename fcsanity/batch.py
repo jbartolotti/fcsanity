@@ -7,6 +7,60 @@ from .metrics import compute_tsnr
 from .io import load_afni_as_nifti, load_nifti, load_censor_file
 
 
+def find_highest_pb_scaled(subject_dir, subject_id, timepoint):
+    """
+    Find the highest-numbered pb*X*.scale+tlrc file in a subject directory.
+    
+    AFNI's preprocessing creates pbNN files with incrementing numbers. The
+    highest number is the final output before nuisance regression.
+    
+    Parameters
+    ----------
+    subject_dir : Path or str
+        Directory to search for pb files
+    subject_id : str
+        Subject ID (for matching filenames)
+    timepoint : str
+        Timepoint (for matching filenames)
+        
+    Returns
+    -------
+    basename : str
+        Basename of the highest pb*X*.scale+tlrc file (without +tlrc extension)
+        
+    Raises
+    ------
+    FileNotFoundError
+        If no pb*.scale+tlrc files found
+    """
+    subject_dir = Path(subject_dir)
+    
+    # Search for all pb*scale+tlrc.BRIK files
+    pattern = f"pb*{subject_id}_{timepoint}*.scale+tlrc.BRIK"
+    pb_files = list(subject_dir.glob(pattern))
+    
+    if not pb_files:
+        raise FileNotFoundError(
+            f"No pb*scale+tlrc files found in {subject_dir} "
+            f"matching {subject_id}_{timepoint}"
+        )
+    
+    # Extract pb number from filename (e.g., "pb06" -> 6)
+    def get_pb_number(filepath):
+        filename = filepath.name
+        # Extract the pb number (digits after 'pb')
+        import re
+        match = re.search(r'pb(\d+)', filename)
+        return int(match.group(1)) if match else 0
+    
+    # Get the file with highest pb number
+    highest_pb_file = max(pb_files, key=get_pb_number)
+    
+    # Return basename without extension
+    basename = highest_pb_file.name.replace("+tlrc.BRIK", "")
+    return basename
+
+
 def compute_tsnr_with_censoring(errts_data, censor_vector, mask):
     """
     Compute tSNR while handling censored volumes.
@@ -127,7 +181,8 @@ class TSnrConfig:
     """Configuration for tSNR pipeline."""
     
     def __init__(self, 
-                 timeseries_basename="pb06.{subject_id}_{timepoint}.scale+tlrc",
+                 use_highest_pb=True,
+                 mask_filename=None,
                  global_mask_path=None,
                  censor_basename="censor_{subject_id}_{timepoint}_combined_2.1D",
                  resting_subfolder="Resting",
@@ -135,9 +190,11 @@ class TSnrConfig:
         """
         Parameters
         ----------
-        timeseries_basename : str
-            AFNI timeseries file basename with {subject_id} and {timepoint} placeholders
-            (default: pb06 scaled pre-regression timeseries)
+        use_highest_pb : bool
+            If True, automatically find and use the highest-numbered pb*scale+tlrc file.
+            If False, use mask_filename to specify the file basename.
+        mask_filename : str, optional
+            Mask filename (not used if use_highest_pb=True)
         global_mask_path : Path or str, optional
             Path to global GM mask file (applied to all subjects)
         censor_basename : str
@@ -147,7 +204,8 @@ class TSnrConfig:
         output_individual_json : bool
             Whether to save individual subject JSON results
         """
-        self.timeseries_basename = timeseries_basename
+        self.use_highest_pb = use_highest_pb
+        self.mask_filename = mask_filename
         self.global_mask_path = global_mask_path
         self.censor_basename = censor_basename
         self.resting_subfolder = resting_subfolder
@@ -221,10 +279,12 @@ def run_tsnr_pipeline(base_path, output_path, subject_ids=None, timepoints=None,
         
         try:
             # Load timeseries
-            ts_img, ts_data = load_afni_as_nifti(
-                results_dir,
-                config.timeseries_basename.format(subject_id=subject_id, timepoint=timepoint)
-            )
+            if config.use_highest_pb:
+                ts_basename = find_highest_pb_scaled(results_dir, subject_id, timepoint)
+            else:
+                ts_basename = config.mask_filename
+            
+            ts_img, ts_data = load_afni_as_nifti(results_dir, ts_basename)
             
             # Use global mask or load per-subject mask
             if global_mask is not None:
