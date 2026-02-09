@@ -3,8 +3,14 @@
 from pathlib import Path
 import pandas as pd
 import numpy as np
+import nibabel as nib
 from .metrics import compute_tsnr
 from .io import load_afni_as_nifti, load_nifti, load_censor_file
+from .connectivity.seed_based import (
+    create_spherical_seed, 
+    compute_seed_correlation_map,
+    compute_mask_statistics
+)
 
 
 def find_highest_pb_scaled(subject_dir, subject_id, timepoint):
@@ -358,6 +364,191 @@ def run_tsnr_pipeline(base_path, output_path, subject_ids=None, timepoints=None,
         # Save errors log if any
         if errors_log:
             error_file = output_path / "tsnr_errors.log"
+            with open(error_file, 'w') as f:
+                f.write("\n".join(errors_log))
+            print(f"⚠ Errors logged to: {error_file}")
+        
+        print(f"\nProcessed: {n_processed} | Errors: {n_errors}")
+        
+        return df
+    else:
+        raise ValueError("No subjects processed successfully")
+
+
+# =============================================================================
+# Seed-Based Connectivity Pipeline
+# =============================================================================
+
+class SCAConfig:
+    """Configuration for seed-based connectivity analysis pipeline."""
+    
+    def __init__(self,
+                 seed_coords,
+                 seed_radius_mm=6,
+                 use_errts=True,
+                 network_mask_path=None,
+                 resting_subfolder="Resting",
+                 fisher_z=True):
+        """
+        Parameters
+        ----------
+        seed_coords : tuple of float
+            (x, y, z) coordinates in MNI space (mm)
+        seed_radius_mm : float
+            Radius of spherical seed in mm
+        use_errts : bool
+            If True, use errts (residual after regression). If False, use highest pb file.
+        network_mask_path : Path or str, optional
+            Path to network mask (e.g., DMN) for computing statistics
+        resting_subfolder : str
+            Name of resting state subfolder
+        fisher_z : bool
+            Whether to apply Fisher Z transformation to correlations
+        """
+        self.seed_coords = seed_coords
+        self.seed_radius_mm = seed_radius_mm
+        self.use_errts = use_errts
+        self.network_mask_path = network_mask_path
+        self.resting_subfolder = resting_subfolder
+        self.fisher_z = fisher_z
+
+
+def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, config=None):
+    """
+    Run seed-based connectivity analysis pipeline on multiple subjects.
+    
+    Generates correlation maps for each subject and computes network statistics.
+    
+    Parameters
+    ----------
+    base_path : Path or str
+        Base path containing subject directories
+    output_path : Path or str
+        Path where to save results and correlation maps
+    subject_ids : list of str, optional
+        Subject IDs to process. If None, processes all found.
+    timepoints : list of str, optional
+        Timepoints to process. If None, finds all available.
+    config : SCAConfig, optional
+        Configuration object. If None, uses defaults.
+        
+    Returns
+    -------
+    results_df : pandas.DataFrame
+        Summary results dataframe
+    """
+    base_path = Path(base_path)
+    output_path = Path(output_path)
+    
+    if config is None:
+        raise ValueError("SCAConfig must be provided with seed coordinates")
+    
+    if timepoints is None:
+        timepoints = ["T1", "T2", "T12"]
+    
+    # Create output directories
+    output_path.mkdir(parents=True, exist_ok=True)
+    maps_dir = output_path / "correlation_maps"
+    maps_dir.mkdir(exist_ok=True)
+    
+    # Load network mask if provided
+    network_mask = None
+    if config.network_mask_path:
+        print(f"Loading network mask: {config.network_mask_path}")
+        network_mask = load_nifti(".", config.network_mask_path)
+    
+    # Find subjects
+    subject_dirs = find_subject_dirs(base_path, subject_ids, timepoints)
+    
+    if not subject_dirs:
+        raise ValueError(f"No subjects found in {base_path}")
+    
+    print(f"Found {len(subject_dirs)} subject/timepoint combinations to process")
+    print(f"Seed: {config.seed_coords} (radius={config.seed_radius_mm}mm)")
+    
+    # Process each subject
+    results_list = []
+    n_processed = 0
+    n_errors = 0
+    errors_log = []
+    
+    output_tsv = output_path / "sca_summary.tsv"
+    
+    for i, (subject_id, timepoint, subject_dir) in enumerate(subject_dirs, 1):
+        print(f"[{i}/{len(subject_dirs)}] {subject_id}_{timepoint}...", end=" ")
+        
+        results_dir = subject_dir / config.resting_subfolder / f"{subject_id}_{timepoint}.rest.results"
+        
+        try:
+            # Load timeseries
+            if config.use_errts:
+                # Find errts file with flexible pattern
+                pattern = f"errts.{subject_id}_{timepoint}*.fanaticor+tlrc.BRIK"
+                errts_files = list(results_dir.glob(pattern))
+                if not errts_files:
+                    raise FileNotFoundError(f"No errts file found matching {pattern}")
+                ts_basename = errts_files[0].name.replace("+tlrc.BRIK", "")
+            else:
+                ts_basename = find_highest_pb_scaled(results_dir, subject_id, timepoint)
+            
+            ts_img, ts_data = load_afni_as_nifti(results_dir, ts_basename)
+            
+            # Create seed mask
+            seed_mask = create_spherical_seed(
+                config.seed_coords,
+                config.seed_radius_mm,
+                ts_img.affine,
+                ts_data.shape[:3]
+            )
+            
+            # Compute correlation map
+            corr_map = compute_seed_correlation_map(ts_data, seed_mask, fisher_z=config.fisher_z)
+            
+            # Save correlation map
+            map_filename = f"{subject_id}_{timepoint}_sca_{'z' if config.fisher_z else 'r'}.nii.gz"
+            map_path = maps_dir / map_filename
+            corr_img = nib.Nifti1Image(corr_map, ts_img.affine, ts_img.header)
+            nib.save(corr_img, str(map_path))
+            
+            # Compute network statistics if mask provided
+            results = {
+                "subject_id": subject_id,
+                "timepoint": timepoint,
+                "map_file": map_filename,
+            }
+            
+            if network_mask is not None:
+                stats = compute_mask_statistics(corr_map, network_mask)
+                results.update(stats)
+                print(f"✓ Z_within={stats['mean_within']:.3f} Z_outside={stats['mean_outside']:.3f}")
+            else:
+                print("✓ Map saved")
+            
+            results_list.append(results)
+            n_processed += 1
+            
+            # Save incremental results
+            df_current = pd.DataFrame(results_list)
+            cols = ["subject_id", "timepoint"] + [c for c in df_current.columns if c not in ["subject_id", "timepoint"]]
+            df_current = df_current[cols]
+            df_current.to_csv(output_tsv, sep="\t", index=False)
+            
+        except Exception as e:
+            print(f"✗ {str(e)}")
+            errors_log.append(f"{subject_id}_{timepoint}: {str(e)}")
+            n_errors += 1
+    
+    # Save final results
+    if results_list:
+        df = pd.DataFrame(results_list)
+        cols = ["subject_id", "timepoint"] + [c for c in df.columns if c not in ["subject_id", "timepoint"]]
+        df = df[cols]
+        
+        print(f"\n✓ Summary saved to: {output_tsv}")
+        print(f"✓ Correlation maps saved to: {maps_dir}")
+        
+        if errors_log:
+            error_file = output_path / "sca_errors.log"
             with open(error_file, 'w') as f:
                 f.write("\n".join(errors_log))
             print(f"⚠ Errors logged to: {error_file}")
