@@ -35,7 +35,7 @@ def find_highest_pb_scaled(subject_dir, subject_id, timepoint):
     """
     subject_dir = Path(subject_dir)
     
-    # Search for all pb*scale+tlrc.BRIK files
+    # Search for all pb*scale+tlrc.BRIK files (matches any task name)
     pattern = f"pb*{subject_id}_{timepoint}*.scale+tlrc.BRIK"
     pb_files = list(subject_dir.glob(pattern))
     
@@ -61,62 +61,85 @@ def find_highest_pb_scaled(subject_dir, subject_id, timepoint):
     return basename
 
 
+def find_censor_file(subject_dir, subject_id, timepoint):
+    """
+    Find censoring file matching the pattern censor_{subject_id}_{timepoint}*combined_2.1D.
+    
+    Handles any task name between timepoint and 'combined'.
+    
+    Parameters
+    ----------
+    subject_dir : Path or str
+        Directory to search for censor file
+    subject_id : str
+        Subject ID
+    timepoint : str
+        Timepoint
+        
+    Returns
+    -------
+    filename : str or None
+        Filename of the censor file, or None if not found
+    """
+    subject_dir = Path(subject_dir)
+    
+    # Search for censor files with any task name
+    pattern = f"censor_{subject_id}_{timepoint}*combined_2.1D"
+    censor_files = list(subject_dir.glob(pattern))
+    
+    if not censor_files:
+        return None
+    
+    # Return the first match (should be only one)
+    return censor_files[0].name
+
+
 def compute_tsnr_with_censoring(errts_data, censor_vector, mask):
     """
-    Compute tSNR while handling censored volumes.
-    
-    Since censored volumes are set to 0 in errts, they artificially reduce
-    tSNR. This function handles that by:
-    1. Computing tSNR using all timepoints (standard)
-    2. Computing tSNR using only uncensored timepoints (more representative)
+    Compute tSNR on uncensored voxels only.
     
     Parameters
     ----------
     errts_data : numpy.ndarray
-        4D errts timeseries (x, y, z, time)
+        4D timeseries (x, y, z, time)
     censor_vector : numpy.ndarray or None
-        Boolean vector (time,) where True = uncensored
+        Boolean vector (time,) where True = uncensored. If None, uses all timepoints.
     mask : numpy.ndarray
         3D binary mask (x, y, z)
         
     Returns
     -------
     results : dict
-        Dictionary with tSNR metrics
+        Dictionary with tSNR metrics and censoring info
     """
     # Reshape to 2D (voxels, time)
-    errts_2d = errts_data.reshape(-1, errts_data.shape[3])
+    ts_2d = errts_data.reshape(-1, errts_data.shape[3])
     mask_1d = mask.astype(bool).flatten()
     
     # Extract brain voxels
-    brain_voxels = errts_2d[mask_1d]
+    brain_voxels = ts_2d[mask_1d]
     
     results = {}
     
-    # Standard tSNR (all timepoints)
-    tsnr_all = compute_tsnr(brain_voxels)
-    results["tsnr_all_mean"] = float(np.mean(tsnr_all))
-    results["tsnr_all_std"] = float(np.std(tsnr_all))
-    results["tsnr_all_median"] = float(np.median(tsnr_all))
-    
-    # tSNR with censoring excluded
+    # Select uncensored frames only
     if censor_vector is not None:
-        brain_voxels_uncensored = brain_voxels[:, censor_vector]
-        tsnr_uncensored = compute_tsnr(brain_voxels_uncensored)
-        results["tsnr_uncensored_mean"] = float(np.mean(tsnr_uncensored))
-        results["tsnr_uncensored_std"] = float(np.std(tsnr_uncensored))
-        results["tsnr_uncensored_median"] = float(np.median(tsnr_uncensored))
-        
-        # Censoring stats
+        brain_voxels_clean = brain_voxels[:, censor_vector]
         n_censored = np.sum(~censor_vector)
         n_total = len(censor_vector)
         results["n_volumes_total"] = int(n_total)
         results["n_volumes_censored"] = int(n_censored)
         results["percent_censored"] = float(100 * n_censored / n_total)
     else:
-        results["n_volumes_total"] = errts_data.shape[3]
+        brain_voxels_clean = brain_voxels
+        results["n_volumes_total"] = brain_voxels.shape[1]
         results["n_volumes_censored"] = 0
         results["percent_censored"] = 0.0
+    
+    # Compute tSNR on clean data
+    tsnr_clean = compute_tsnr(brain_voxels_clean)
+    results["tsnr_mean"] = float(np.mean(tsnr_clean))
+    results["tsnr_std"] = float(np.std(tsnr_clean))
+    results["tsnr_median"] = float(np.median(tsnr_clean))
     
     return results
 
@@ -293,10 +316,8 @@ def run_tsnr_pipeline(base_path, output_path, subject_ids=None, timepoints=None,
                 mask = load_nifti(results_dir, config.mask_filename)
             
             # Load censoring vector
-            censor = load_censor_file(
-                results_dir,
-                config.censor_basename.format(subject_id=subject_id, timepoint=timepoint)
-            )
+            censor_filename = find_censor_file(results_dir, subject_id, timepoint)
+            censor = load_censor_file(results_dir, censor_filename) if censor_filename else None
             
             # Compute tSNR
             results = compute_tsnr_with_censoring(ts_data, censor, mask)
@@ -307,7 +328,7 @@ def run_tsnr_pipeline(base_path, output_path, subject_ids=None, timepoints=None,
             results_list.append(results)
             
             # Print summary
-            tsnr_val = results.get('tsnr_uncensored_mean', results.get('tsnr_all_mean'))
+            tsnr_val = results.get('tsnr_mean')
             censor_pct = results.get('percent_censored', 0)
             print(f"✓ tSNR={tsnr_val:.2f} censor={censor_pct:.1f}%")
             
