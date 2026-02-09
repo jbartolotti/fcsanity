@@ -127,18 +127,19 @@ class TSnrConfig:
     """Configuration for tSNR pipeline."""
     
     def __init__(self, 
-                 errts_basename="errts.{subject_id}_{timepoint}.rest.fanaticor",
-                 mask_filename="GM_mask_aeseg_epi.nii.gz",
+                 timeseries_basename="pb06.{subject_id}_{timepoint}.scale+tlrc",
+                 global_mask_path=None,
                  censor_basename="censor_{subject_id}_{timepoint}_combined_2.1D",
                  resting_subfolder="Resting",
                  output_individual_json=True):
         """
         Parameters
         ----------
-        errts_basename : str
-            AFNI errts file basename with {subject_id} and {timepoint} placeholders
-        mask_filename : str
-            Brain/tissue mask filename
+        timeseries_basename : str
+            AFNI timeseries file basename with {subject_id} and {timepoint} placeholders
+            (default: pb06 scaled pre-regression timeseries)
+        global_mask_path : Path or str, optional
+            Path to global GM mask file (applied to all subjects)
         censor_basename : str
             Censoring file basename with {subject_id} and {timepoint} placeholders
         resting_subfolder : str
@@ -146,8 +147,8 @@ class TSnrConfig:
         output_individual_json : bool
             Whether to save individual subject JSON results
         """
-        self.errts_basename = errts_basename
-        self.mask_filename = mask_filename
+        self.timeseries_basename = timeseries_basename
+        self.global_mask_path = global_mask_path
         self.censor_basename = censor_basename
         self.resting_subfolder = resting_subfolder
         self.output_individual_json = output_individual_json
@@ -190,6 +191,12 @@ def run_tsnr_pipeline(base_path, output_path, subject_ids=None, timepoints=None,
     # Create output directory
     output_path.mkdir(parents=True, exist_ok=True)
     
+    # Load global mask if provided
+    global_mask = None
+    if config.global_mask_path:
+        print(f"Loading global mask: {config.global_mask_path}")
+        global_mask = load_nifti(".", config.global_mask_path)
+    
     # Find subjects to process
     subject_dirs = find_subject_dirs(base_path, subject_ids, timepoints)
     
@@ -204,6 +211,8 @@ def run_tsnr_pipeline(base_path, output_path, subject_ids=None, timepoints=None,
     n_errors = 0
     errors_log = []
     
+    output_tsv = output_path / "tsnr_summary.tsv"
+    
     for i, (subject_id, timepoint, subject_dir) in enumerate(subject_dirs, 1):
         print(f"[{i}/{len(subject_dirs)}] {subject_id}_{timepoint}...", end=" ")
         
@@ -211,14 +220,17 @@ def run_tsnr_pipeline(base_path, output_path, subject_ids=None, timepoints=None,
         results_dir = subject_dir / config.resting_subfolder / f"{subject_id}_{timepoint}.rest.results"
         
         try:
-            # Load data
-            errts_img, errts_data = load_afni_as_nifti(
+            # Load timeseries
+            ts_img, ts_data = load_afni_as_nifti(
                 results_dir,
-                config.errts_basename.format(subject_id=subject_id, timepoint=timepoint)
+                config.timeseries_basename.format(subject_id=subject_id, timepoint=timepoint)
             )
             
-            # Load mask
-            mask = load_nifti(results_dir, config.mask_filename)
+            # Use global mask or load per-subject mask
+            if global_mask is not None:
+                mask = global_mask
+            else:
+                mask = load_nifti(results_dir, config.mask_filename)
             
             # Load censoring vector
             censor = load_censor_file(
@@ -227,7 +239,7 @@ def run_tsnr_pipeline(base_path, output_path, subject_ids=None, timepoints=None,
             )
             
             # Compute tSNR
-            results = compute_tsnr_with_censoring(errts_data, censor, mask)
+            results = compute_tsnr_with_censoring(ts_data, censor, mask)
             
             # Add subject/timepoint info
             results["subject_id"] = subject_id
@@ -241,12 +253,18 @@ def run_tsnr_pipeline(base_path, output_path, subject_ids=None, timepoints=None,
             
             n_processed += 1
             
+            # Save incremental results to TSV
+            df_current = pd.DataFrame(results_list)
+            cols = ["subject_id", "timepoint"] + [c for c in df_current.columns if c not in ["subject_id", "timepoint"]]
+            df_current = df_current[cols]
+            df_current.to_csv(output_tsv, sep="\t", index=False)
+            
         except Exception as e:
             print(f"✗ {str(e)}")
             errors_log.append(f"{subject_id}_{timepoint}: {str(e)}")
             n_errors += 1
     
-    # Save summary results
+    # Save final results and errors log
     if results_list:
         df = pd.DataFrame(results_list)
         
@@ -254,9 +272,6 @@ def run_tsnr_pipeline(base_path, output_path, subject_ids=None, timepoints=None,
         cols = ["subject_id", "timepoint"] + [c for c in df.columns if c not in ["subject_id", "timepoint"]]
         df = df[cols]
         
-        # Save TSV summary
-        output_tsv = output_path / "tsnr_summary.tsv"
-        df.to_csv(output_tsv, sep="\t", index=False)
         print(f"\n✓ Summary saved to: {output_tsv}")
         
         # Save errors log if any
