@@ -101,38 +101,57 @@ def compute_seed_correlation_map(timeseries_4d, seed_mask, fisher_z=True):
     return correlation_map
 
 
-def compute_mask_statistics(correlation_map, mask):
+def compute_mask_statistics(correlation_map, network_mask, gm_mask=None, brain_mask=None):
     """
-    Compute mean values within and outside a mask.
+    Compute mean values within network, within GM outside network, and outside brain.
     
     Parameters
     ----------
     correlation_map : numpy.ndarray
         3D map of values (e.g., Z-scores)
-    mask : numpy.ndarray
-        3D binary mask
+    network_mask : numpy.ndarray
+        3D binary mask for network of interest (e.g., DMN)
+    gm_mask : numpy.ndarray, optional
+        3D binary gray matter mask
+    brain_mask : numpy.ndarray, optional
+        3D binary brain mask
         
     Returns
     -------
     stats : dict
-        Dictionary with 'mean_within', 'mean_outside', 'std_within', 'std_outside'
+        Dictionary with statistics for each region
     """
-    mask_bool = mask.astype(bool).flatten()
     values_flat = correlation_map.flatten()
+    network_bool = network_mask.astype(bool).flatten()
     
-    within_values = values_flat[mask_bool]
-    outside_values = values_flat[~mask_bool]
-    
-    # Remove NaN/inf values
+    # Within network
+    within_values = values_flat[network_bool]
     within_values = within_values[np.isfinite(within_values)]
-    outside_values = outside_values[np.isfinite(outside_values)]
     
     stats = {
-        'mean_within': float(np.mean(within_values)) if len(within_values) > 0 else np.nan,
-        'std_within': float(np.std(within_values)) if len(within_values) > 0 else np.nan,
-        'mean_outside': float(np.mean(outside_values)) if len(outside_values) > 0 else np.nan,
-        'std_outside': float(np.std(outside_values)) if len(outside_values) > 0 else np.nan,
+        'mean_within_network': float(np.mean(within_values)) if len(within_values) > 0 else np.nan,
+        'std_within_network': float(np.std(within_values)) if len(within_values) > 0 else np.nan,
     }
+    
+    # Within GM but outside network
+    if gm_mask is not None:
+        gm_bool = gm_mask.astype(bool).flatten()
+        gm_outside_network = gm_bool & ~network_bool
+        gm_outside_values = values_flat[gm_outside_network]
+        gm_outside_values = gm_outside_values[np.isfinite(gm_outside_values)]
+        
+        stats['mean_gm_outside_network'] = float(np.mean(gm_outside_values)) if len(gm_outside_values) > 0 else np.nan
+        stats['std_gm_outside_network'] = float(np.std(gm_outside_values)) if len(gm_outside_values) > 0 else np.nan
+    
+    # Outside brain mask
+    if brain_mask is not None:
+        brain_bool = brain_mask.astype(bool).flatten()
+        outside_brain = ~brain_bool
+        outside_values = values_flat[outside_brain]
+        outside_values = outside_values[np.isfinite(outside_values)]
+        
+        stats['mean_outside_brain'] = float(np.mean(outside_values)) if len(outside_values) > 0 else np.nan
+        stats['std_outside_brain'] = float(np.std(outside_values)) if len(outside_values) > 0 else np.nan
     
     return stats
 

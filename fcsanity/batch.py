@@ -387,6 +387,8 @@ class SCAConfig:
                  seed_radius_mm=6,
                  use_errts=True,
                  network_mask_path=None,
+                 gm_mask_path=None,
+                 brain_mask_path=None,
                  resting_subfolder="Resting",
                  fisher_z=True):
         """
@@ -400,6 +402,10 @@ class SCAConfig:
             If True, use errts (residual after regression). If False, use highest pb file.
         network_mask_path : Path or str, optional
             Path to network mask (e.g., DMN) for computing statistics
+        gm_mask_path : Path or str, optional
+            Path to gray matter mask
+        brain_mask_path : Path or str, optional
+            Path to brain mask
         resting_subfolder : str
             Name of resting state subfolder
         fisher_z : bool
@@ -409,6 +415,8 @@ class SCAConfig:
         self.seed_radius_mm = seed_radius_mm
         self.use_errts = use_errts
         self.network_mask_path = network_mask_path
+        self.gm_mask_path = gm_mask_path
+        self.brain_mask_path = brain_mask_path
         self.resting_subfolder = resting_subfolder
         self.fisher_z = fisher_z
 
@@ -457,6 +465,18 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
         print(f"Loading network mask: {config.network_mask_path}")
         network_mask = load_nifti(".", config.network_mask_path)
     
+    # Load GM mask if provided
+    gm_mask = None
+    if config.gm_mask_path:
+        print(f"Loading GM mask: {config.gm_mask_path}")
+        gm_mask = load_nifti(".", config.gm_mask_path)
+    
+    # Load brain mask if provided
+    brain_mask = None
+    if config.brain_mask_path:
+        print(f"Loading brain mask: {config.brain_mask_path}")
+        brain_mask = load_nifti(".", config.brain_mask_path)
+    
     # Find subjects
     subject_dirs = find_subject_dirs(base_path, subject_ids, timepoints)
     
@@ -480,35 +500,43 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
         results_dir = subject_dir / config.resting_subfolder / f"{subject_id}_{timepoint}.rest.results"
         
         try:
-            # Load timeseries
-            if config.use_errts:
-                # Find errts file with flexible pattern
-                pattern = f"errts.{subject_id}_{timepoint}*.fanaticor+tlrc.BRIK"
-                errts_files = list(results_dir.glob(pattern))
-                if not errts_files:
-                    raise FileNotFoundError(f"No errts file found matching {pattern}")
-                ts_basename = errts_files[0].name.replace("+tlrc.BRIK", "")
-            else:
-                ts_basename = find_highest_pb_scaled(results_dir, subject_id, timepoint)
-            
-            ts_img, ts_data = load_afni_as_nifti(results_dir, ts_basename)
-            
-            # Create seed mask
-            seed_mask = create_spherical_seed(
-                config.seed_coords,
-                config.seed_radius_mm,
-                ts_img.affine,
-                ts_data.shape[:3]
-            )
-            
-            # Compute correlation map
-            corr_map = compute_seed_correlation_map(ts_data, seed_mask, fisher_z=config.fisher_z)
-            
-            # Save correlation map
+            # Define output filename
             map_filename = f"{subject_id}_{timepoint}_sca_{'z' if config.fisher_z else 'r'}.nii.gz"
             map_path = maps_dir / map_filename
-            corr_img = nib.Nifti1Image(corr_map, ts_img.affine, ts_img.header)
-            nib.save(corr_img, str(map_path))
+            
+            # Check if output already exists
+            if map_path.exists():
+                print(f"Loading existing map...", end=" ")
+                corr_img = nib.load(str(map_path))
+                corr_map = np.asarray(corr_img.dataobj)
+            else:
+                # Load timeseries
+                if config.use_errts:
+                    # Find errts file with flexible pattern
+                    pattern = f"errts.{subject_id}_{timepoint}*.fanaticor+tlrc.BRIK"
+                    errts_files = list(results_dir.glob(pattern))
+                    if not errts_files:
+                        raise FileNotFoundError(f"No errts file found matching {pattern}")
+                    ts_basename = errts_files[0].name.replace("+tlrc.BRIK", "")
+                else:
+                    ts_basename = find_highest_pb_scaled(results_dir, subject_id, timepoint)
+                
+                ts_img, ts_data = load_afni_as_nifti(results_dir, ts_basename)
+                
+                # Create seed mask
+                seed_mask = create_spherical_seed(
+                    config.seed_coords,
+                    config.seed_radius_mm,
+                    ts_img.affine,
+                    ts_data.shape[:3]
+                )
+                
+                # Compute correlation map
+                corr_map = compute_seed_correlation_map(ts_data, seed_mask, fisher_z=config.fisher_z)
+                
+                # Save correlation map
+                corr_img = nib.Nifti1Image(corr_map, ts_img.affine, ts_img.header)
+                nib.save(corr_img, str(map_path))
             
             # Compute network statistics if mask provided
             results = {
@@ -518,9 +546,9 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
             }
             
             if network_mask is not None:
-                stats = compute_mask_statistics(corr_map, network_mask)
+                stats = compute_mask_statistics(corr_map, network_mask, gm_mask, brain_mask)
                 results.update(stats)
-                print(f"✓ Z_within={stats['mean_within']:.3f} Z_outside={stats['mean_outside']:.3f}")
+                print(f"✓ Z_within={stats['mean_within_network']:.3f} Z_gm_outside={stats['mean_gm_outside_network']:.3f} Z_outside_brain={stats['mean_outside_brain']:.3f}")
             else:
                 print("✓ Map saved")
             
