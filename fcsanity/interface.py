@@ -199,7 +199,7 @@ def initialize_sca_from_args(
     - Seed validation
     - Output path derivation from BIDS structure
     - Resource validation
-    - SCAConfig creation
+    - SCAConfig creation with multiple network masks
     
     Parameters
     ----------
@@ -268,25 +268,20 @@ def initialize_sca_from_args(
     )
     
     seed_coords = seed_info["coords"]
-    network_mask_path = seed_info.get("network_mask")
-    if network_mask_path is not None:
-        network_mask_path = Path(network_mask_path)
-
-    mask_name = seed_info.get("mask_name") or _infer_mask_name(network_mask_path)
     
-    # Create output path (BIDS-compliant derivatives/fcsanity/SEED_NAME/)
-    output_path = derivatives_root / args.seed
-
-    # Optional: fetch Yeo 2011 atlas and generate network mask if missing
-    if (network_mask_path is None or not network_mask_path.exists()) and resources_dir:
-        if yeo_network_map is None:
-            yeo_network_map = {
-                "pcc": 7,
-                "lips": 3,
-            }
-
-        network_id = yeo_network_map.get(args.seed)
-        if network_id is not None:
+    # Create output path (BIDS-compliant derivatives/fcsanity/sca/)
+    output_path = derivatives_root
+    
+    # Build network masks list
+    network_masks = []
+    network_targets = seed_info.get("network_targets")
+    
+    if network_targets and resources_dir:
+        # Use Yeo atlas with network_targets
+        yeo_name_map = {3: "DAN", 7: "DMN"}
+        primary_network = network_targets[0] if network_targets else None
+        
+        for i, network_id in enumerate(network_targets):
             try:
                 network_mask_path = get_yeo_network_mask(
                     network_id=network_id,
@@ -295,23 +290,36 @@ def initialize_sca_from_args(
                     n_networks=yeo_n_networks,
                     overwrite=yeo_overwrite,
                 )
-                seed_info["network_mask"] = network_mask_path
-                yeo_name_map = {3: "DAN", 7: "DMN"}
-                mask_name = seed_info.get("mask_name") or yeo_name_map.get(network_id) or _infer_mask_name(network_mask_path)
-                seed_info["mask_name"] = mask_name
+                mask_name = yeo_name_map.get(network_id) or f"Network-{network_id}"
+                mask_type = "within" if network_id == primary_network else "between"
+                
+                network_masks.append({
+                    "path": network_mask_path,
+                    "name": mask_name,
+                    "mask_type": mask_type
+                })
             except Exception as exc:
                 print(
-                    f"⚠ Could not generate Yeo 2011 network mask for seed '{args.seed}': {exc}",
+                    f"⚠ Could not generate Yeo network mask {network_id} for seed '{args.seed}': {exc}",
                     file=sys.stderr,
                 )
+    elif seed_info.get("network_mask"):
+        # Use legacy single network_mask if specified
+        network_mask_path = Path(seed_info["network_mask"])
+        mask_name = seed_info.get("mask_name") or _infer_mask_name(network_mask_path)
+        network_masks.append({
+            "path": network_mask_path,
+            "name": mask_name,
+            "mask_type": "within"
+        })
     
     # Validate resources exist
     resources = {
         "GM mask": gm_mask_path,
         "Brain mask": brain_mask_path,
     }
-    if network_mask_path:
-        resources[f"{args.seed.upper()} network mask"] = network_mask_path
+    for mask_info in network_masks:
+        resources[f"{mask_info['name']} network mask"] = mask_info["path"]
     
     missing = validate_resources(resources, verbose=True)
     
@@ -321,8 +329,7 @@ def initialize_sca_from_args(
         seed_name=args.seed,
         seed_radius_mm=seed_radius_mm,
         use_errts=True,
-        network_mask_path=network_mask_path,
-        network_mask_name=mask_name,
+        network_masks=network_masks,
         gm_mask_path=gm_mask_path,
         brain_mask_path=brain_mask_path,
         resting_subfolder=resting_subfolder,
@@ -341,7 +348,7 @@ def print_pipeline_header(
     seed_radius_mm: float,
     gm_mask_path: Path,
     brain_mask_path: Path,
-    network_mask_path: Optional[Path] = None,
+    network_masks: Optional[List[Dict]] = None,
 ) -> None:
     """
     Print standardized pipeline header with configuration details.
@@ -364,8 +371,8 @@ def print_pipeline_header(
         Path to GM mask
     brain_mask_path : Path
         Path to brain mask
-    network_mask_path : Path, optional
-        Path to network mask if available
+    network_masks : list of dict, optional
+        List of network masks with 'path', 'name', 'mask_type'
         
     Example
     -------
@@ -391,8 +398,10 @@ def print_pipeline_header(
     print(f"\nSeed:         {seed_name} - {seed_name_human}")
     print(f"Coordinates:  {seed_coords} (MNI space)")
     print(f"Radius:       {seed_radius_mm}mm")
-    if network_mask_path and network_mask_path.exists():
-        print(f"Network mask: {network_mask_path}")
+    if network_masks:
+        print(f"Network masks:")
+        for mask_info in network_masks:
+            print(f"  - {mask_info['name']} ({mask_info['mask_type']}): {mask_info['path']}")
     print(f"GM mask:      {gm_mask_path}")
     print(f"Brain mask:   {brain_mask_path}\n")
 

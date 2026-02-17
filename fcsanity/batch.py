@@ -426,8 +426,7 @@ class SCAConfig:
                  seed_name=None,
                  seed_radius_mm=6,
                  use_errts=True,
-                 network_mask_path=None,
-                 network_mask_name=None,
+                 network_masks=None,
                  gm_mask_path=None,
                  brain_mask_path=None,
                  resting_subfolder="Resting",
@@ -443,10 +442,11 @@ class SCAConfig:
             Radius of spherical seed in mm
         use_errts : bool
             If True, use errts (residual after regression). If False, use highest pb file.
-        network_mask_path : Path or str, optional
-            Path to network mask (e.g., DMN) for computing statistics
-        network_mask_name : str, optional
-            Human-readable name for network mask (e.g., "DMN")
+        network_masks : list of dict, optional
+            List of network masks, each dict containing:
+                - 'path': Path to mask file
+                - 'name': Human-readable name (e.g., "DMN", "DAN")
+                - 'mask_type': "within" or "between"
         gm_mask_path : Path or str, optional
             Path to gray matter mask
         brain_mask_path : Path or str, optional
@@ -460,8 +460,7 @@ class SCAConfig:
         self.seed_name = seed_name
         self.seed_radius_mm = seed_radius_mm
         self.use_errts = use_errts
-        self.network_mask_path = network_mask_path
-        self.network_mask_name = network_mask_name
+        self.network_masks = network_masks if network_masks is not None else []
         self.gm_mask_path = gm_mask_path
         self.brain_mask_path = brain_mask_path
         self.resting_subfolder = resting_subfolder
@@ -521,7 +520,7 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
     group_dir.mkdir(exist_ok=True)
     
     # Masks are loaded after we have a reference image (first subject)
-    network_mask = None
+    network_masks_data = []  # List of {name, mask_type, data}
     gm_mask = None
     brain_mask = None
     masks_initialized = False
@@ -608,9 +607,20 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
 
             if not masks_initialized:
                 cache_dir = output_path / "resources"
-                if config.network_mask_path:
-                    print(f"Loading network mask: {config.network_mask_path}")
-                    network_mask = _load_or_resample_mask(config.network_mask_path, ts_img, cache_dir)
+                
+                # Load network masks
+                for mask_info in config.network_masks:
+                    mask_path = mask_info["path"]
+                    mask_name = mask_info["name"]
+                    mask_type = mask_info["mask_type"]
+                    print(f"Loading network mask: {mask_name} ({mask_path})")
+                    mask_data = _load_or_resample_mask(mask_path, ts_img, cache_dir)
+                    network_masks_data.append({
+                        "name": mask_name,
+                        "mask_type": mask_type,
+                        "data": mask_data
+                    })
+                
                 if config.gm_mask_path:
                     print(f"Loading GM mask: {config.gm_mask_path}")
                     gm_mask = _load_or_resample_mask(config.gm_mask_path, ts_img, cache_dir)
@@ -640,56 +650,76 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
                 corr_img = nib.Nifti1Image(corr_map, ts_img.affine, ts_img.header)
                 nib.save(corr_img, str(map_path))
             
-            # Compute network statistics if mask provided
+            # Compute network statistics for each mask
             seed_name = config.seed_name or "seed"
-            mask_name = config.network_mask_name or _infer_mask_name(config.network_mask_path) or "network"
 
-            if network_mask is not None:
-                stats = compute_mask_statistics(corr_map, network_mask, gm_mask, brain_mask)
-                within = stats.get("within_network", {})
-                gm_outside = stats.get("gm_outside_network", {})
-                outside = stats.get("outside_brain", {})
-
-                results_list.extend([
-                    {
+            if network_masks_data:
+                # Compute stats for each network mask
+                network_means = []
+                for mask_info in network_masks_data:
+                    network_mask = mask_info["data"]
+                    mask_name = mask_info["name"]
+                    mask_type = mask_info["mask_type"]
+                    
+                    stats = compute_mask_statistics(corr_map, network_mask, gm_mask, brain_mask)
+                    within = stats.get("within_network", {})
+                    mean_z = within.get("mean", np.nan)
+                    network_means.append((mask_name, mean_z))
+                    
+                    results_list.append({
                         "subject_id": subject_id,
                         "timepoint": timepoint,
                         "seed": seed_name,
                         "mask_name": mask_name,
-                        "mask_type": "within",
-                        "mean_z": within.get("mean", np.nan),
+                        "mask_type": mask_type,
+                        "mean_z": mean_z,
                         "std_z": within.get("std", np.nan),
                         "n_voxels": within.get("n_voxels", 0),
                         "map_file": map_filename,
-                    },
-                    {
-                        "subject_id": subject_id,
-                        "timepoint": timepoint,
-                        "seed": seed_name,
-                        "mask_name": "gray_matter",
-                        "mask_type": "between",
-                        "mean_z": gm_outside.get("mean", np.nan),
-                        "std_z": gm_outside.get("std", np.nan),
-                        "n_voxels": gm_outside.get("n_voxels", 0),
-                        "map_file": map_filename,
-                    },
-                    {
-                        "subject_id": subject_id,
-                        "timepoint": timepoint,
-                        "seed": seed_name,
-                        "mask_name": "outside_brain",
-                        "mask_type": "outside_brain",
-                        "mean_z": outside.get("mean", np.nan),
-                        "std_z": outside.get("std", np.nan),
-                        "n_voxels": outside.get("n_voxels", 0),
-                        "map_file": map_filename,
-                    },
-                ])
-                print(
-                    f"✓ Z_within={within.get('mean', np.nan):.3f} "
-                    f"Z_gm_outside={gm_outside.get('mean', np.nan):.3f} "
-                    f"Z_outside_brain={outside.get('mean', np.nan):.3f}"
-                )
+                    })
+                
+                # Also compute GM (outside all networks) and outside_brain
+                # Create combined network mask (union of all networks)
+                if len(network_masks_data) > 0:
+                    combined_network_mask = np.zeros_like(network_masks_data[0]["data"])
+                    for mask_info in network_masks_data:
+                        combined_network_mask = np.logical_or(combined_network_mask, mask_info["data"])
+                    
+                    # Compute stats with combined mask
+                    stats = compute_mask_statistics(corr_map, combined_network_mask, gm_mask, brain_mask)
+                    gm_outside = stats.get("gm_outside_network", {})
+                    outside = stats.get("outside_brain", {})
+                    
+                    results_list.extend([
+                        {
+                            "subject_id": subject_id,
+                            "timepoint": timepoint,
+                            "seed": seed_name,
+                            "mask_name": "gray_matter",
+                            "mask_type": "between",
+                            "mean_z": gm_outside.get("mean", np.nan),
+                            "std_z": gm_outside.get("std", np.nan),
+                            "n_voxels": gm_outside.get("n_voxels", 0),
+                            "map_file": map_filename,
+                        },
+                        {
+                            "subject_id": subject_id,
+                            "timepoint": timepoint,
+                            "seed": seed_name,
+                            "mask_name": "outside_brain",
+                            "mask_type": "outside_brain",
+                            "mean_z": outside.get("mean", np.nan),
+                            "std_z": outside.get("std", np.nan),
+                            "n_voxels": outside.get("n_voxels", 0),
+                            "map_file": map_filename,
+                        },
+                    ])
+                
+                # Print summary
+                network_stats_str = " ".join([f"{name}={val:.3f}" for name, val in network_means])
+                print(f"✓ {network_stats_str} "
+                      f"GM={gm_outside.get('mean', np.nan):.3f} "
+                      f"Outside={outside.get('mean', np.nan):.3f}")
             else:
                 results_list.append({
                     "subject_id": subject_id,
