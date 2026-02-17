@@ -1,6 +1,7 @@
 """I/O utilities for loading and managing fMRI data."""
 
 from pathlib import Path
+import json
 import numpy as np
 import nibabel as nib
 
@@ -78,3 +79,53 @@ def load_censor_file(subject_dir, censor_filename):
     
     censor = np.loadtxt(str(filepath))
     return censor.astype(bool)
+
+def load_seeds(json_path, resources_dir=None):
+    """
+    Load seed definitions from JSON file.
+    
+    Parameters
+    ----------
+    json_path : Path or str
+        Path to seeds.json file
+    resources_dir : Path or str, optional
+        Path to resources directory. If provided, network_mask paths will be
+        resolved relative to this directory.
+        
+    Returns
+    -------
+    seeds : dict
+        Dictionary mapping seed names to seed information
+        Each seed contains: name, coords (list), description, network_mask (path or None)
+        
+    Examples
+    --------
+    >>> seeds = load_seeds("seeds.json")
+    >>> seeds["pcc"]["coords"]
+    (0, -52, 26)
+    
+    >>> seeds = load_seeds("seeds.json", resources_dir="/path/to/atlases")
+    >>> seeds["pcc"]["network_mask"]
+    PosixPath('/path/to/atlases/DMN_mask.nii.gz')
+    """
+    json_path = Path(json_path)
+    
+    if not json_path.exists():
+        raise FileNotFoundError(f"Seeds file not found: {json_path}")
+    
+    with open(json_path, 'r') as f:
+        seeds_dict = json.load(f)
+    
+    # Convert coords to tuples and resolve network_mask paths
+    for seed_name, seed_info in seeds_dict.items():
+        # Convert coords list to tuple
+        seed_info["coords"] = tuple(seed_info["coords"])
+        
+        # Resolve network_mask path if provided
+        if seed_info.get("network_mask") and resources_dir:
+            network_mask = seed_info["network_mask"]
+            if network_mask is not None:
+                resources_path = Path(resources_dir)
+                seed_info["network_mask"] = resources_path / network_mask
+    
+    return seeds_dict

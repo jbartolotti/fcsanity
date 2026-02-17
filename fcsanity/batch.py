@@ -13,6 +13,45 @@ from .connectivity.seed_based import (
 )
 
 
+# =============================================================================
+# Resource Management
+# =============================================================================
+
+def validate_resources(resources_dict, verbose=True):
+    """
+    Validate that required resource files exist.
+    
+    Parameters
+    ----------
+    resources_dict : dict
+        Dictionary mapping resource names to paths
+        Example: {"GM mask": Path("..."), "Brain mask": Path("...")}
+    verbose : bool
+        If True, print warnings for missing resources
+        
+    Returns
+    -------
+    missing : list
+        List of missing resource names/paths
+    """
+    missing = []
+    for name, path in resources_dict.items():
+        if not Path(path).exists():
+            missing.append(f"{name}: {path}")
+    
+    if missing and verbose:
+        print("\n⚠ Warning: The following resource files are missing:")
+        for m in missing:
+            print(f"  {m}")
+        print()
+    
+    return missing
+
+
+# =============================================================================
+# File Discovery
+# =============================================================================
+
 def find_highest_pb_scaled(subject_dir, subject_id, timepoint):
     """
     Find the highest-numbered pb*X*.scale+tlrc file in a subject directory.

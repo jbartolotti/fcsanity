@@ -8,5 +8,6 @@ from . import metrics
 from . import connectivity
 from . import io
 from . import batch
+from . import interface
 
-__all__ = ["metrics", "connectivity", "io", "batch"]
+__all__ = ["metrics", "connectivity", "io", "batch", "interface"]
