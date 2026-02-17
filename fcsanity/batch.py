@@ -561,8 +561,9 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
         results_dir = subject_dir / config.resting_subfolder / f"{subject_id}_{timepoint}.rest.results"
         
         try:
-            # Define output filename
-            map_filename = f"{subject_id}_{timepoint}_sca_{'z' if config.fisher_z else 'r'}.nii.gz"
+            # Define output filename (include seed name)
+            seed_name = config.seed_name or "seed"
+            map_filename = f"{subject_id}_{timepoint}_seed-{seed_name}_sca_{'z' if config.fisher_z else 'r'}.nii.gz"
             map_path = maps_dir / map_filename
             
             # Check if output already exists
@@ -678,6 +679,14 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
                 "map_file",
             ]
             df_current = df_current[cols]
+
+            if group_tsv.exists():
+                df_existing = pd.read_csv(group_tsv, sep="\t")
+                df_current = pd.concat([df_existing, df_current], ignore_index=True)
+                df_current = df_current.drop_duplicates(
+                    subset=["subject_id", "timepoint", "seed", "mask_name", "mask_type", "map_file"],
+                    keep="last",
+                )
             df_current.to_csv(group_tsv, sep="\t", index=False)
 
             # Save per-subject summary
@@ -686,6 +695,13 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
             subject_out_dir.mkdir(exist_ok=True)
             subject_tsv = subject_out_dir / "sca_summary.tsv"
             df_subject = df_current[df_current["subject_id"] == subject_id]
+            if subject_tsv.exists():
+                df_subject_existing = pd.read_csv(subject_tsv, sep="\t")
+                df_subject = pd.concat([df_subject_existing, df_subject], ignore_index=True)
+                df_subject = df_subject.drop_duplicates(
+                    subset=["subject_id", "timepoint", "seed", "mask_name", "mask_type", "map_file"],
+                    keep="last",
+                )
             df_subject.to_csv(subject_tsv, sep="\t", index=False)
             
         except Exception as e:

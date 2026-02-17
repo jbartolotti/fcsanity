@@ -78,14 +78,21 @@ def compute_seed_correlation_map(timeseries_4d, seed_mask, fisher_z=True):
     seed_ts = np.mean(ts_2d[seed_mask_1d], axis=0)
     
     # Standardize seed timeseries
-    seed_ts = (seed_ts - np.mean(seed_ts)) / np.std(seed_ts)
+    seed_std = np.std(seed_ts)
+    if seed_std == 0 or not np.isfinite(seed_std):
+        raise ValueError("Seed timeseries has zero variance; cannot compute correlations.")
+    seed_ts = (seed_ts - np.mean(seed_ts)) / seed_std
     
     # Compute correlations for all voxels
     correlations = np.zeros(ts_2d.shape[0])
     for i in range(ts_2d.shape[0]):
         voxel_ts = ts_2d[i]
         # Standardize voxel timeseries
-        voxel_ts_std = (voxel_ts - np.mean(voxel_ts)) / np.std(voxel_ts)
+        voxel_std = np.std(voxel_ts)
+        if voxel_std == 0 or not np.isfinite(voxel_std):
+            correlations[i] = np.nan
+            continue
+        voxel_ts_std = (voxel_ts - np.mean(voxel_ts)) / voxel_std
         # Pearson correlation
         correlations[i] = np.mean(seed_ts * voxel_ts_std)
     

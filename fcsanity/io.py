@@ -173,13 +173,25 @@ def fetch_yeo_2011_atlas(
     )
 
     atlas_key = f"{thickness}_{n_networks}"
-    if not hasattr(atlas, atlas_key):
+    atlas_path = None
+
+    if hasattr(atlas, atlas_key):
+        atlas_path = getattr(atlas, atlas_key)
+    elif isinstance(atlas, dict) and atlas_key in atlas:
+        atlas_path = atlas[atlas_key]
+    elif hasattr(atlas, "get"):
+        atlas_path = atlas.get(atlas_key)
+
+    if atlas_path is None:
+        available = []
+        if hasattr(atlas, "keys"):
+            available = sorted(list(atlas.keys()))
         raise ValueError(
             f"Requested atlas variant not available: {atlas_key}. "
-            "Valid options: thick_7, thin_7, thick_17, thin_17."
+            f"Available options: {', '.join(available) if available else 'thick_7, thin_7, thick_17, thin_17'}."
         )
 
-    return Path(getattr(atlas, atlas_key))
+    return Path(atlas_path)
 
 
 def get_yeo_network_mask(
