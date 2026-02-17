@@ -11,6 +11,18 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from fcsanity.batch import SCAConfig, validate_resources
+from fcsanity.io import get_yeo_network_mask
+
+
+def _infer_mask_name(mask_path: Optional[Path]) -> Optional[str]:
+    if mask_path is None:
+        return None
+    name = Path(mask_path).name
+    if name.endswith(".nii.gz"):
+        return name[:-7]
+    if name.endswith(".nii"):
+        return name[:-4]
+    return Path(name).stem
 
 
 def setup_sca_parser(
@@ -174,6 +186,11 @@ def initialize_sca_from_args(
     seed_radius_mm: float = 6.0,
     resting_subfolder: str = "Resting",
     fisher_z: bool = True,
+    resources_dir: Optional[Path] = None,
+    yeo_network_map: Optional[Dict[str, int]] = None,
+    yeo_thickness: str = "thick",
+    yeo_n_networks: int = 7,
+    yeo_overwrite: bool = False,
 ) -> Tuple[argparse.Namespace, SCAConfig, Path]:
     """
     Initialize SCA configuration from CLI arguments and BIDS structure.
@@ -204,6 +221,16 @@ def initialize_sca_from_args(
         Name of resting-state subfolder (default: "Resting")
     fisher_z : bool
         Apply Fisher Z-transformation (default: True)
+    resources_dir : Path, optional
+        Resources directory for atlas downloads and generated masks
+    yeo_network_map : dict, optional
+        Mapping of seed name to Yeo network ID (e.g., {"pcc": 7, "lips": 3})
+    yeo_thickness : str
+        Atlas thickness variant ("thick" or "thin", default: "thick")
+    yeo_n_networks : int
+        Number of networks in atlas (7 or 17, default: 7)
+    yeo_overwrite : bool
+        Overwrite existing Yeo-derived masks (default: False)
         
     Returns
     -------
@@ -242,9 +269,41 @@ def initialize_sca_from_args(
     
     seed_coords = seed_info["coords"]
     network_mask_path = seed_info.get("network_mask")
+    if network_mask_path is not None:
+        network_mask_path = Path(network_mask_path)
+
+    mask_name = seed_info.get("mask_name") or _infer_mask_name(network_mask_path)
     
     # Create output path (BIDS-compliant derivatives/fcsanity/SEED_NAME/)
     output_path = derivatives_root / args.seed
+
+    # Optional: fetch Yeo 2011 atlas and generate network mask if missing
+    if (network_mask_path is None or not network_mask_path.exists()) and resources_dir:
+        if yeo_network_map is None:
+            yeo_network_map = {
+                "pcc": 7,
+                "lips": 3,
+            }
+
+        network_id = yeo_network_map.get(args.seed)
+        if network_id is not None:
+            try:
+                network_mask_path = get_yeo_network_mask(
+                    network_id=network_id,
+                    resources_dir=resources_dir,
+                    thickness=yeo_thickness,
+                    n_networks=yeo_n_networks,
+                    overwrite=yeo_overwrite,
+                )
+                seed_info["network_mask"] = network_mask_path
+                yeo_name_map = {3: "DAN", 7: "DMN"}
+                mask_name = seed_info.get("mask_name") or yeo_name_map.get(network_id) or _infer_mask_name(network_mask_path)
+                seed_info["mask_name"] = mask_name
+            except Exception as exc:
+                print(
+                    f"⚠ Could not generate Yeo 2011 network mask for seed '{args.seed}': {exc}",
+                    file=sys.stderr,
+                )
     
     # Validate resources exist
     resources = {
@@ -259,9 +318,11 @@ def initialize_sca_from_args(
     # Create SCAConfig
     config = SCAConfig(
         seed_coords=seed_coords,
+        seed_name=args.seed,
         seed_radius_mm=seed_radius_mm,
         use_errts=True,
         network_mask_path=network_mask_path,
+        network_mask_name=mask_name,
         gm_mask_path=gm_mask_path,
         brain_mask_path=brain_mask_path,
         resting_subfolder=resting_subfolder,

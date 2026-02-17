@@ -123,36 +123,45 @@ def compute_mask_statistics(correlation_map, network_mask, gm_mask=None, brain_m
     """
     values_flat = correlation_map.flatten()
     network_bool = network_mask.astype(bool).flatten()
-    
+
     # Within network
     within_values = values_flat[network_bool]
     within_values = within_values[np.isfinite(within_values)]
-    
+
     stats = {
-        'mean_within_network': float(np.mean(within_values)) if len(within_values) > 0 else np.nan,
-        'std_within_network': float(np.std(within_values)) if len(within_values) > 0 else np.nan,
+        "within_network": {
+            "mean": float(np.mean(within_values)) if len(within_values) > 0 else np.nan,
+            "std": float(np.std(within_values)) if len(within_values) > 0 else np.nan,
+            "n_voxels": int(len(within_values)),
+        }
     }
-    
+
     # Within GM but outside network
     if gm_mask is not None:
         gm_bool = gm_mask.astype(bool).flatten()
         gm_outside_network = gm_bool & ~network_bool
         gm_outside_values = values_flat[gm_outside_network]
         gm_outside_values = gm_outside_values[np.isfinite(gm_outside_values)]
-        
-        stats['mean_gm_outside_network'] = float(np.mean(gm_outside_values)) if len(gm_outside_values) > 0 else np.nan
-        stats['std_gm_outside_network'] = float(np.std(gm_outside_values)) if len(gm_outside_values) > 0 else np.nan
-    
+
+        stats["gm_outside_network"] = {
+            "mean": float(np.mean(gm_outside_values)) if len(gm_outside_values) > 0 else np.nan,
+            "std": float(np.std(gm_outside_values)) if len(gm_outside_values) > 0 else np.nan,
+            "n_voxels": int(len(gm_outside_values)),
+        }
+
     # Outside brain mask
     if brain_mask is not None:
         brain_bool = brain_mask.astype(bool).flatten()
         outside_brain = ~brain_bool
         outside_values = values_flat[outside_brain]
         outside_values = outside_values[np.isfinite(outside_values)]
-        
-        stats['mean_outside_brain'] = float(np.mean(outside_values)) if len(outside_values) > 0 else np.nan
-        stats['std_outside_brain'] = float(np.std(outside_values)) if len(outside_values) > 0 else np.nan
-    
+
+        stats["outside_brain"] = {
+            "mean": float(np.mean(outside_values)) if len(outside_values) > 0 else np.nan,
+            "std": float(np.std(outside_values)) if len(outside_values) > 0 else np.nan,
+            "n_voxels": int(len(outside_values)),
+        }
+
     return stats
 
 

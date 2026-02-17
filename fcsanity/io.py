@@ -129,3 +129,110 @@ def load_seeds(json_path, resources_dir=None):
                 seed_info["network_mask"] = resources_path / network_mask
     
     return seeds_dict
+
+
+def fetch_yeo_2011_atlas(
+    data_dir,
+    thickness: str = "thick",
+    n_networks: int = 7,
+    verbose: int = 1,
+):
+    """
+    Fetch the Yeo 2011 atlas using nilearn and return the atlas path.
+    
+    Parameters
+    ----------
+    data_dir : Path or str
+        Directory where atlas files should be downloaded
+    thickness : str
+        "thick" or "thin" atlas variant (default: "thick")
+    n_networks : int
+        Number of networks (7 or 17, default: 7)
+    verbose : int
+        nilearn verbosity level
+        
+    Returns
+    -------
+    atlas_path : Path
+        Path to the requested atlas NIfTI file
+    """
+    try:
+        from nilearn import datasets
+    except ImportError as exc:
+        raise ImportError(
+            "nilearn is required for fetching Yeo 2011 atlas. "
+            "Install it with 'pip install nilearn'."
+        ) from exc
+
+    data_dir = Path(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    atlas = datasets.fetch_atlas_yeo_2011(
+        data_dir=str(data_dir),
+        verbose=verbose,
+    )
+
+    atlas_key = f"{thickness}_{n_networks}"
+    if not hasattr(atlas, atlas_key):
+        raise ValueError(
+            f"Requested atlas variant not available: {atlas_key}. "
+            "Valid options: thick_7, thin_7, thick_17, thin_17."
+        )
+
+    return Path(getattr(atlas, atlas_key))
+
+
+def get_yeo_network_mask(
+    network_id: int,
+    resources_dir,
+    thickness: str = "thick",
+    n_networks: int = 7,
+    atlas_subdir: str = "yeo2011",
+    overwrite: bool = False,
+):
+    """
+    Create (or return) a binary mask for a single Yeo 2011 network.
+    
+    Parameters
+    ----------
+    network_id : int
+        Network label ID in the atlas (e.g., 3 = dorsal attention, 7 = default mode)
+    resources_dir : Path or str
+        Base resources directory to store atlas and masks
+    thickness : str
+        "thick" or "thin" atlas variant (default: "thick")
+    n_networks : int
+        Number of networks (7 or 17, default: 7)
+    atlas_subdir : str
+        Subdirectory under resources_dir for atlas files
+    overwrite : bool
+        If True, overwrite existing mask file
+        
+    Returns
+    -------
+    mask_path : Path
+        Path to the created (or existing) network mask NIfTI file
+    """
+    resources_dir = Path(resources_dir)
+    atlas_dir = resources_dir / atlas_subdir
+    atlas_path = fetch_yeo_2011_atlas(
+        data_dir=atlas_dir,
+        thickness=thickness,
+        n_networks=n_networks,
+    )
+
+    mask_name = f"yeo2011_{n_networks}net_{thickness}_network-{network_id}.nii.gz"
+    mask_path = atlas_dir / mask_name
+
+    if mask_path.exists() and not overwrite:
+        return mask_path
+
+    atlas_img = nib.load(str(atlas_path))
+    atlas_data = np.asarray(atlas_img.dataobj)
+    mask_data = (atlas_data == network_id).astype(np.uint8)
+
+    mask_img = nib.Nifti1Image(mask_data, affine=atlas_img.affine, header=atlas_img.header)
+    mask_img.header.set_data_dtype(np.uint8)
+    nib.save(mask_img, str(mask_path))
+
+    return mask_path

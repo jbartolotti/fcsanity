@@ -423,9 +423,11 @@ class SCAConfig:
     
     def __init__(self,
                  seed_coords,
+                 seed_name=None,
                  seed_radius_mm=6,
                  use_errts=True,
                  network_mask_path=None,
+                 network_mask_name=None,
                  gm_mask_path=None,
                  brain_mask_path=None,
                  resting_subfolder="Resting",
@@ -435,12 +437,16 @@ class SCAConfig:
         ----------
         seed_coords : tuple of float
             (x, y, z) coordinates in MNI space (mm)
+        seed_name : str, optional
+            Seed identifier (e.g., "pcc") for reporting
         seed_radius_mm : float
             Radius of spherical seed in mm
         use_errts : bool
             If True, use errts (residual after regression). If False, use highest pb file.
         network_mask_path : Path or str, optional
             Path to network mask (e.g., DMN) for computing statistics
+        network_mask_name : str, optional
+            Human-readable name for network mask (e.g., "DMN")
         gm_mask_path : Path or str, optional
             Path to gray matter mask
         brain_mask_path : Path or str, optional
@@ -451,13 +457,27 @@ class SCAConfig:
             Whether to apply Fisher Z transformation to correlations
         """
         self.seed_coords = seed_coords
+        self.seed_name = seed_name
         self.seed_radius_mm = seed_radius_mm
         self.use_errts = use_errts
         self.network_mask_path = network_mask_path
+        self.network_mask_name = network_mask_name
         self.gm_mask_path = gm_mask_path
         self.brain_mask_path = brain_mask_path
         self.resting_subfolder = resting_subfolder
         self.fisher_z = fisher_z
+
+
+def _infer_mask_name(mask_path):
+    """Infer a readable mask name from a file path."""
+    if mask_path is None:
+        return None
+    name = Path(mask_path).name
+    if name.endswith(".nii.gz"):
+        return name[:-7]
+    if name.endswith(".nii"):
+        return name[:-4]
+    return Path(name).stem
 
 
 def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, config=None):
@@ -497,6 +517,8 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
     output_path.mkdir(parents=True, exist_ok=True)
     maps_dir = output_path / "correlation_maps"
     maps_dir.mkdir(exist_ok=True)
+    group_dir = output_path / "group"
+    group_dir.mkdir(exist_ok=True)
     
     # Load network mask if provided
     network_mask = None
@@ -531,7 +553,7 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
     n_errors = 0
     errors_log = []
     
-    output_tsv = output_path / "sca_summary.tsv"
+    group_tsv = group_dir / "sca_summary.tsv"
     
     for i, (subject_id, timepoint, subject_dir) in enumerate(subject_dirs, 1):
         print(f"[{i}/{len(subject_dirs)}] {subject_id}_{timepoint}...", end=" ")
@@ -578,27 +600,93 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
                 nib.save(corr_img, str(map_path))
             
             # Compute network statistics if mask provided
-            results = {
-                "subject_id": subject_id,
-                "timepoint": timepoint,
-                "map_file": map_filename,
-            }
-            
+            seed_name = config.seed_name or "seed"
+            mask_name = config.network_mask_name or _infer_mask_name(config.network_mask_path) or "network"
+
             if network_mask is not None:
                 stats = compute_mask_statistics(corr_map, network_mask, gm_mask, brain_mask)
-                results.update(stats)
-                print(f"✓ Z_within={stats['mean_within_network']:.3f} Z_gm_outside={stats['mean_gm_outside_network']:.3f} Z_outside_brain={stats['mean_outside_brain']:.3f}")
+                within = stats.get("within_network", {})
+                gm_outside = stats.get("gm_outside_network", {})
+                outside = stats.get("outside_brain", {})
+
+                results_list.extend([
+                    {
+                        "subject_id": subject_id,
+                        "timepoint": timepoint,
+                        "seed": seed_name,
+                        "mask_name": mask_name,
+                        "mask_type": "within",
+                        "mean_z": within.get("mean", np.nan),
+                        "std_z": within.get("std", np.nan),
+                        "n_voxels": within.get("n_voxels", 0),
+                        "map_file": map_filename,
+                    },
+                    {
+                        "subject_id": subject_id,
+                        "timepoint": timepoint,
+                        "seed": seed_name,
+                        "mask_name": "gray_matter",
+                        "mask_type": "between",
+                        "mean_z": gm_outside.get("mean", np.nan),
+                        "std_z": gm_outside.get("std", np.nan),
+                        "n_voxels": gm_outside.get("n_voxels", 0),
+                        "map_file": map_filename,
+                    },
+                    {
+                        "subject_id": subject_id,
+                        "timepoint": timepoint,
+                        "seed": seed_name,
+                        "mask_name": "outside_brain",
+                        "mask_type": "outside_brain",
+                        "mean_z": outside.get("mean", np.nan),
+                        "std_z": outside.get("std", np.nan),
+                        "n_voxels": outside.get("n_voxels", 0),
+                        "map_file": map_filename,
+                    },
+                ])
+                print(
+                    f"✓ Z_within={within.get('mean', np.nan):.3f} "
+                    f"Z_gm_outside={gm_outside.get('mean', np.nan):.3f} "
+                    f"Z_outside_brain={outside.get('mean', np.nan):.3f}"
+                )
             else:
+                results_list.append({
+                    "subject_id": subject_id,
+                    "timepoint": timepoint,
+                    "seed": seed_name,
+                    "mask_name": "none",
+                    "mask_type": "none",
+                    "mean_z": np.nan,
+                    "std_z": np.nan,
+                    "n_voxels": 0,
+                    "map_file": map_filename,
+                })
                 print("✓ Map saved")
-            
-            results_list.append(results)
             n_processed += 1
             
-            # Save incremental results
+            # Save incremental group results
             df_current = pd.DataFrame(results_list)
-            cols = ["subject_id", "timepoint"] + [c for c in df_current.columns if c not in ["subject_id", "timepoint"]]
+            cols = [
+                "subject_id",
+                "timepoint",
+                "seed",
+                "mask_name",
+                "mask_type",
+                "mean_z",
+                "std_z",
+                "n_voxels",
+                "map_file",
+            ]
             df_current = df_current[cols]
-            df_current.to_csv(output_tsv, sep="\t", index=False)
+            df_current.to_csv(group_tsv, sep="\t", index=False)
+
+            # Save per-subject summary
+            subject_dirname = subject_id if subject_id.startswith("sub-") else f"sub-{subject_id}"
+            subject_out_dir = output_path / subject_dirname
+            subject_out_dir.mkdir(exist_ok=True)
+            subject_tsv = subject_out_dir / "sca_summary.tsv"
+            df_subject = df_current[df_current["subject_id"] == subject_id]
+            df_subject.to_csv(subject_tsv, sep="\t", index=False)
             
         except Exception as e:
             print(f"✗ {str(e)}")
@@ -608,10 +696,20 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
     # Save final results
     if results_list:
         df = pd.DataFrame(results_list)
-        cols = ["subject_id", "timepoint"] + [c for c in df.columns if c not in ["subject_id", "timepoint"]]
+        cols = [
+            "subject_id",
+            "timepoint",
+            "seed",
+            "mask_name",
+            "mask_type",
+            "mean_z",
+            "std_z",
+            "n_voxels",
+            "map_file",
+        ]
         df = df[cols]
         
-        print(f"\n✓ Summary saved to: {output_tsv}")
+        print(f"\n✓ Group summary saved to: {group_tsv}")
         print(f"✓ Correlation maps saved to: {maps_dir}")
         
         if errors_log:
