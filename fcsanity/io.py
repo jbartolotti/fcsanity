@@ -153,8 +153,8 @@ def fetch_yeo_2011_atlas(
         
     Returns
     -------
-    atlas_path : Path
-        Path to the requested atlas NIfTI file
+    atlas_img : nibabel.Nifti1Image
+        Atlas image with integer labels for networks
     """
     try:
         from nilearn import datasets
@@ -170,28 +170,28 @@ def fetch_yeo_2011_atlas(
     atlas = datasets.fetch_atlas_yeo_2011(
         data_dir=str(data_dir),
         verbose=verbose,
+        n_networks=n_networks,
+        thickness=thickness,
     )
 
-    atlas_key = f"{thickness}_{n_networks}"
-    atlas_path = None
-
-    if hasattr(atlas, atlas_key):
-        atlas_path = getattr(atlas, atlas_key)
-    elif isinstance(atlas, dict) and atlas_key in atlas:
-        atlas_path = atlas[atlas_key]
+    atlas_img = None
+    if hasattr(atlas, "maps"):
+        atlas_img = atlas.maps
+    elif isinstance(atlas, dict) and "maps" in atlas:
+        atlas_img = atlas["maps"]
     elif hasattr(atlas, "get"):
-        atlas_path = atlas.get(atlas_key)
+        atlas_img = atlas.get("maps")
 
-    if atlas_path is None:
+    if atlas_img is None:
         available = []
         if hasattr(atlas, "keys"):
             available = sorted(list(atlas.keys()))
         raise ValueError(
-            f"Requested atlas variant not available: {atlas_key}. "
-            f"Available options: {', '.join(available) if available else 'thick_7, thin_7, thick_17, thin_17'}."
+            "Yeo atlas maps not found in fetched dataset. "
+            f"Available keys: {', '.join(available) if available else 'unknown'}."
         )
 
-    return Path(atlas_path)
+    return atlas_img
 
 
 def get_yeo_network_mask(
@@ -227,7 +227,7 @@ def get_yeo_network_mask(
     """
     resources_dir = Path(resources_dir)
     atlas_dir = resources_dir / atlas_subdir
-    atlas_path = fetch_yeo_2011_atlas(
+    atlas_img = fetch_yeo_2011_atlas(
         data_dir=atlas_dir,
         thickness=thickness,
         n_networks=n_networks,
@@ -239,7 +239,6 @@ def get_yeo_network_mask(
     if mask_path.exists() and not overwrite:
         return mask_path
 
-    atlas_img = nib.load(str(atlas_path))
     atlas_data = np.asarray(atlas_img.dataobj)
     mask_data = (atlas_data == network_id).astype(np.uint8)
 
