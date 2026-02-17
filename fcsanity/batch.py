@@ -736,7 +736,16 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
             n_processed += 1
             
             # Save incremental group results
-            df_current = pd.DataFrame(results_list)
+            # Get only the NEW rows for this subject/timepoint (last N rows added)
+            if network_masks_data:
+                # Number of rows = network masks + GM + outside_brain
+                n_new_rows = len(network_masks_data) + 2
+            else:
+                # Just one row when no masks
+                n_new_rows = 1
+            
+            new_rows = results_list[-n_new_rows:]
+            df_new = pd.DataFrame(new_rows)
             cols = [
                 "subject_id",
                 "timepoint",
@@ -748,31 +757,36 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
                 "n_voxels",
                 "map_file",
             ]
-            df_current = df_current[cols]
+            df_new = df_new[cols]
 
+            # Append to group TSV
             if group_tsv.exists():
                 df_existing = pd.read_csv(group_tsv, sep="\t")
-                df_current = pd.concat([df_existing, df_current], ignore_index=True)
-                df_current = df_current.drop_duplicates(
+                df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+                df_combined = df_combined.drop_duplicates(
                     subset=["subject_id", "timepoint", "seed", "mask_name", "mask_type", "map_file"],
                     keep="last",
                 )
-            df_current.to_csv(group_tsv, sep="\t", index=False)
+                df_combined.to_csv(group_tsv, sep="\t", index=False)
+            else:
+                df_new.to_csv(group_tsv, sep="\t", index=False)
 
             # Save per-subject summary
             subject_dirname = subject_id if subject_id.startswith("sub-") else f"sub-{subject_id}"
             subject_out_dir = output_path / subject_dirname
             subject_out_dir.mkdir(exist_ok=True)
             subject_tsv = subject_out_dir / "sca_summary.tsv"
-            df_subject = df_current[df_current["subject_id"] == subject_id]
+            
             if subject_tsv.exists():
                 df_subject_existing = pd.read_csv(subject_tsv, sep="\t")
-                df_subject = pd.concat([df_subject_existing, df_subject], ignore_index=True)
+                df_subject = pd.concat([df_subject_existing, df_new], ignore_index=True)
                 df_subject = df_subject.drop_duplicates(
                     subset=["subject_id", "timepoint", "seed", "mask_name", "mask_type", "map_file"],
                     keep="last",
                 )
-            df_subject.to_csv(subject_tsv, sep="\t", index=False)
+                df_subject.to_csv(subject_tsv, sep="\t", index=False)
+            else:
+                df_new.to_csv(subject_tsv, sep="\t", index=False)
             
         except Exception as e:
             print(f"✗ {str(e)}")
