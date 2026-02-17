@@ -191,6 +191,9 @@ def fetch_yeo_2011_atlas(
             f"Available keys: {', '.join(available) if available else 'unknown'}."
         )
 
+    if isinstance(atlas_img, (str, Path)):
+        atlas_img = nib.load(str(atlas_img))
+
     return atlas_img
 
 
