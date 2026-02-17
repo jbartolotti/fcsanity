@@ -520,23 +520,50 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
     group_dir = output_path / "group"
     group_dir.mkdir(exist_ok=True)
     
-    # Load network mask if provided
+    # Masks are loaded after we have a reference image (first subject)
     network_mask = None
-    if config.network_mask_path:
-        print(f"Loading network mask: {config.network_mask_path}")
-        network_mask = load_nifti(".", config.network_mask_path)
-    
-    # Load GM mask if provided
     gm_mask = None
-    if config.gm_mask_path:
-        print(f"Loading GM mask: {config.gm_mask_path}")
-        gm_mask = load_nifti(".", config.gm_mask_path)
-    
-    # Load brain mask if provided
     brain_mask = None
-    if config.brain_mask_path:
-        print(f"Loading brain mask: {config.brain_mask_path}")
-        brain_mask = load_nifti(".", config.brain_mask_path)
+    masks_initialized = False
+
+    def _mask_base_name(mask_path: Path) -> str:
+        name = mask_path.name
+        if name.endswith(".nii.gz"):
+            return name[:-7]
+        if name.endswith(".nii"):
+            return name[:-4]
+        return mask_path.stem
+
+    def _load_or_resample_mask(mask_path: Path, ref_img: nib.Nifti1Image, cache_dir: Path) -> np.ndarray:
+        if mask_path is None:
+            return None
+
+        mask_path = Path(mask_path)
+        if not mask_path.exists():
+            raise FileNotFoundError(f"Mask file not found: {mask_path}")
+
+        base = _mask_base_name(mask_path)
+        shape_tag = "x".join(map(str, ref_img.shape[:3]))
+        cache_path = cache_dir / f"{base}_resample_to_{shape_tag}.nii.gz"
+
+        if cache_path.exists():
+            mask_img = nib.load(str(cache_path))
+        else:
+            mask_img = nib.load(str(mask_path))
+            if mask_img.shape[:3] != ref_img.shape[:3]:
+                try:
+                    from nilearn.image import resample_to_img
+                except ImportError as exc:
+                    raise ImportError(
+                        "nilearn is required for mask resampling. "
+                        "Install it with 'pip install nilearn'."
+                    ) from exc
+
+                mask_img = resample_to_img(mask_img, ref_img, interpolation="nearest")
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                nib.save(mask_img, str(cache_path))
+
+        return np.asarray(mask_img.dataobj)
     
     # Find subjects
     subject_dirs = find_subject_dirs(base_path, subject_ids, timepoints)
@@ -565,26 +592,39 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
             seed_name = config.seed_name or "seed"
             map_filename = f"{subject_id}_{timepoint}_seed-{seed_name}_sca_{'z' if config.fisher_z else 'r'}.nii.gz"
             map_path = maps_dir / map_filename
-            
+
+            # Load timeseries reference (needed for mask resampling)
+            if config.use_errts:
+                # Find errts file with flexible pattern
+                pattern = f"errts.{subject_id}_{timepoint}*.fanaticor+tlrc.BRIK"
+                errts_files = list(results_dir.glob(pattern))
+                if not errts_files:
+                    raise FileNotFoundError(f"No errts file found matching {pattern}")
+                ts_basename = errts_files[0].name.replace("+tlrc.BRIK", "")
+            else:
+                ts_basename = find_highest_pb_scaled(results_dir, subject_id, timepoint)
+
+            ts_img, ts_data = load_afni_as_nifti(results_dir, ts_basename)
+
+            if not masks_initialized:
+                cache_dir = output_path / "resources"
+                if config.network_mask_path:
+                    print(f"Loading network mask: {config.network_mask_path}")
+                    network_mask = _load_or_resample_mask(config.network_mask_path, ts_img, cache_dir)
+                if config.gm_mask_path:
+                    print(f"Loading GM mask: {config.gm_mask_path}")
+                    gm_mask = _load_or_resample_mask(config.gm_mask_path, ts_img, cache_dir)
+                if config.brain_mask_path:
+                    print(f"Loading brain mask: {config.brain_mask_path}")
+                    brain_mask = _load_or_resample_mask(config.brain_mask_path, ts_img, cache_dir)
+                masks_initialized = True
+
             # Check if output already exists
             if map_path.exists():
                 print(f"Loading existing map...", end=" ")
                 corr_img = nib.load(str(map_path))
                 corr_map = np.asarray(corr_img.dataobj)
             else:
-                # Load timeseries
-                if config.use_errts:
-                    # Find errts file with flexible pattern
-                    pattern = f"errts.{subject_id}_{timepoint}*.fanaticor+tlrc.BRIK"
-                    errts_files = list(results_dir.glob(pattern))
-                    if not errts_files:
-                        raise FileNotFoundError(f"No errts file found matching {pattern}")
-                    ts_basename = errts_files[0].name.replace("+tlrc.BRIK", "")
-                else:
-                    ts_basename = find_highest_pb_scaled(results_dir, subject_id, timepoint)
-                
-                ts_img, ts_data = load_afni_as_nifti(results_dir, ts_basename)
-                
                 # Create seed mask
                 seed_mask = create_spherical_seed(
                     config.seed_coords,
@@ -592,10 +632,10 @@ def run_sca_pipeline(base_path, output_path, subject_ids=None, timepoints=None, 
                     ts_img.affine,
                     ts_data.shape[:3]
                 )
-                
+
                 # Compute correlation map
                 corr_map = compute_seed_correlation_map(ts_data, seed_mask, fisher_z=config.fisher_z)
-                
+
                 # Save correlation map
                 corr_img = nib.Nifti1Image(corr_map, ts_img.affine, ts_img.header)
                 nib.save(corr_img, str(map_path))
